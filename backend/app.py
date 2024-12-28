@@ -2,49 +2,69 @@ import eventlet
 eventlet.monkey_patch() 
 from flask import Flask, jsonify, request
 from flask_socketio import SocketIO, emit
+from flask_sqlalchemy import SQLAlchemy
 import os
 import base64
 import csv
 import io
 import threading
 import time
+from flask_cors import CORS  # Import CORS
+import pandas as pd
+
 
 app = Flask(__name__)
+app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///app_data.db'
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+app.config['UPLOAD_FOLDER'] = 'uploads'
+CORS(app)  # Enable CORS
 socketio = SocketIO(app, cors_allowed_origins="*")
-
-# Dictionary to store connected devices, using UUID as the key and SID as the value
-connected_devices = {}
-
-# Task queue to store file upload tasks
-task_queue = []
+db = SQLAlchemy(app)
 
 # Directory to save uploaded files
-UPLOAD_FOLDER = "uploads"
-os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
+
+# Database model for connected devices
+class ConnectedDevice(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    uuid = db.Column(db.String(120), unique=True, nullable=False)
+    sid = db.Column(db.String(120), nullable=False)
+    status = db.Column(db.String(50), nullable=False)
+    client = db.Column(db.String(120), nullable=True, default='web')
+    cpuCores = db.Column(db.Integer, nullable=True)
+    gpu = db.Column(db.String(150), nullable=True)
+
+# Database model for uploaded files
+class UploadedFile(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    file_name = db.Column(db.String(255), nullable=False)
+    file_path = db.Column(db.String(255), nullable=False)
+    sid = db.Column(db.String(120), nullable=False)
+
+
 
 @app.route('/')
-def health_check():
+def handle_connect(auth):
     return jsonify({"status": "API is running"}), 200
 
 @socketio.on('connect')
-def handle_connect():
-    """
-    Handle new connection.
-    """
-    sid = request.sid
-    device_uuid = request.args.get('uuid')  # Get the UUID sent by frontend during connection
-    if not device_uuid:
-        emit('error', {'status': 'error', 'message': 'UUID is required for connection'})
-        print(f"Client connection failed: {sid}, UUID is required")
-        return
+def handle_connect(auth=None): 
+    print(f"Client connected: {request.sid}")
+    device = ConnectedDevice.query.filter_by(sid=request.sid).first()
+    if device:
+        device.sid = request.sid
+        device.status = 'connected'
+        db.session.commit()
+    else:
+        uuid = request.args.get('uuid')
+        print(f"Device UUID: {uuid}")
+        device = ConnectedDevice.query.filter_by(uuid=uuid).first()
+        if device:
+            device.sid = request.sid
+            device.status = 'connected'
+            db.session.commit()
+    emit('connect_ack', {'status': 'connected'}, to=request.sid)
 
-    print(f"Client connected: {sid}, UUID: {device_uuid}")
-    
-    # Add the device to the connected_devices dictionary with UUID as the key
-    connected_devices[device_uuid] = {"sid": sid, "status": "available"}
-    
-    # Emit all connected devices to the client
-    emit_all_devices()
 
 @socketio.on('disconnect')
 def handle_disconnect():
@@ -52,19 +72,21 @@ def handle_disconnect():
     Handle client disconnection.
     """
     sid = request.sid
+    uuid = request.args.get('uuid')
     print(f"Client disconnected: {sid}")
 
-    # Find and remove the device from the connected_devices dictionary using the sid
-    device_uuid = None
-    for uuid_key, device in connected_devices.items():
-        if device["sid"] == sid:
-            device_uuid = uuid_key
-            break
-    
-    if device_uuid:
-        # Update status and set to "not available"
-        connected_devices[device_uuid]["status"] = "not available"
-        print(f"Device {device_uuid} marked as 'not available'")
+    # Update status in the database
+    device = ConnectedDevice.query.filter_by(sid=sid).first()
+    if device:
+        device.status = "not available"
+        db.session.commit()
+        print(f"Device {device.uuid} marked as 'not available'")
+    else:
+        device = ConnectedDevice.query.filter_by(uuid=uuid).first()
+        if device:
+            device.status = "not available"
+            db.session.commit()
+            print(f"Device {device.uuid} marked as 'not available'")
 
     emit_all_devices()
 
@@ -73,62 +95,73 @@ def handle_device_info(data):
     """
     Handle the incoming device information from the frontend.
     """
-    sid = request.sid
-    print(f"Received device info from {sid}: {data}")
-    
-    # Update device info based on the sid
-    for device in connected_devices.values():
-        if device["sid"] == sid:
-            device.update(data)
-            break
+    deviceuuid = data.get('uuid')
+    while not deviceuuid:
+        deviceuuid = data.get('uuid')
+        time.sleep(.5)
+
+    # Update device info in the database
+    device = ConnectedDevice.query.filter_by(uuid=deviceuuid).first()
+    if device:
+        # You can extend the model and update the device info fields here if necessary
+        device.client = data.get('client')
+        device.cpuCores = data.get('cpuCores')
+        gpu_info = data.get('gpu')
+        if gpu_info:
+            device.gpu = gpu_info.get('vendor')
+        db.session.commit()
+    else:
+        
+        new_device = ConnectedDevice(uuid=deviceuuid, sid=request.sid, status='connected', client=data.get('client'), cpuCores=data.get('cpuCores'), gpu=data.get('gpu').get('vendor'))
+        db.session.add(new_device)
+        db.session.commit()
+        print(f"Device {deviceuuid} added to the database")
 
     emit('device_response', {'status': 'success', 'message': 'Device info received'})
     emit_all_devices()
 
-@socketio.on('upload_file')
-def handle_file_upload(data):
+@app.route('/upload_file', methods=['POST'])
+def upload_file_rest():
     """
-    Handle CSV file upload from the frontend.
+    Handle file upload via REST API (using form-data).
     """
-    sid = request.sid
-    file_name = data.get('file_name')
-    file_content = data.get('file_content')  # Assume this is Base64-encoded content
+    if 'file' not in request.files:
+        return jsonify({'status': 'error', 'message': 'No file part'}), 400
     
-    if not file_name or not file_content:
-        emit('upload_response', {'status': 'error', 'message': 'Invalid file data'})
-        return
+    file = request.files['file']
+    if file.filename == '':
+        return jsonify({'status': 'error', 'message': 'No selected file'}), 400
+    
+    sid = request.form.get('sid')  # Assuming the session ID is provided in the form data
+    
+    if not sid:
+        return jsonify({'status': 'error', 'message': 'Session ID (sid) is required'}), 400
+    
+    if not file.filename.endswith('.csv'):
+        return jsonify({'status': 'error', 'message': 'Only .csv files are allowed'}), 400
 
-    if not file_name.endswith('.csv'):
-        emit('upload_response', {'status': 'error', 'message': 'Only .csv files are allowed'})
-        return
-
-    # Decode and save the file
     try:
-        file_path = os.path.join(UPLOAD_FOLDER, f"{sid}_{file_name}")
-        # Decode Base64 file content
-        decoded_content = base64.b64decode(file_content)
-        
-        with open(file_path, 'wb') as f:
-            f.write(decoded_content)  # Save the decoded file
-        print(f"CSV file saved: {file_path}")
-        
-        # Add task to the queue
-        task_queue.append({"sid": sid, "file_name": file_name})
-        
-        # Optionally, process the CSV file (if needed)
-        process_csv(file_path)
+        # Save the file to the server
+        file_path = os.path.join(app.config['UPLOAD_FOLDER'], file.filename)
+        file.save(file_path)
 
-        emit('upload_response', {'status': 'success', 'message': 'File uploaded successfully'})
+        # Store file metadata in the database
+        uploaded_file = UploadedFile(file_name=file.filename, file_path=file_path, sid=sid)
+        db.session.add(uploaded_file)
+        db.session.commit()
+
+        return jsonify({'status': 'success', 'message': 'File uploaded successfully'}), 200
     except Exception as e:
-        print(f"Error saving file: {e}")
-        emit('upload_response', {'status': 'error', 'message': str(e)})
+        return jsonify({'status': 'error', 'message': str(e)}), 500
 
 @socketio.on('get_tasks')
 def handle_get_tasks():
     """
     Send the current task queue to the client.
     """
-    emit('task_queue', task_queue)
+    tasks = UploadedFile.query.all()
+    task_list = [{"file_name": task.file_name, "file_path": task.file_path, "sid": task.sid} for task in tasks]
+    emit('task_queue', task_list)
 
 def process_csv(file_path):
     """
@@ -148,32 +181,76 @@ def emit_all_devices():
     """
     Emit the list of all connected devices to all clients.
     """
-    alldevices = []
-    for key, value in connected_devices.items():
-        alldevices.append({"uuid": key, "info": value})
+    devices = ConnectedDevice.query.all()
+    alldevices = [{"uuid": device.uuid, "sid": device.sid, "status": device.status} for device in devices]
     emit('all_devices', alldevices, broadcast=True)
 
+
+UPLOAD_FOLDER = "uploads"
+CHUNK_SIZE = 100  # Number of rows per chunk for splitting the dataset
+TARGET_FILE = "hallucination_11k.csv"  # The specific file we want to process
 def task_handler():
     """
     Background task handler to process tasks in the task queue.
     It will run in an infinite loop and process each task.
     """
-    while True:
-        if task_queue:
-            # Get the first task in the queue
-            task = task_queue.pop(0)
-            print(f"Processing task: {task['file_name']} for SID: {task['sid']}")
+    count = 0
+    while True and count == 0:
+        count = 1
+        file_path = os.path.join(UPLOAD_FOLDER, TARGET_FILE)
+        if not os.path.exists(file_path):
+            print(f"{TARGET_FILE} not found. Waiting for file to be uploaded.")
+            continue  # Wait until the file is uploaded
+        try:
+            # Read the CSV file using pandas
+            df = pd.read_csv(file_path)
 
-            # Simulate some task processing (here we just print and wait)
-            time.sleep(5)  # Wait for 5 seconds
+            # Split the dataframe into chunks
+            chunks = [df.iloc[i:i + CHUNK_SIZE] for i in range(0, len(df), CHUNK_SIZE)]
 
-            print(f"Task completed: {task['file_name']}")
-        else:
-            time.sleep(1)  # No tasks, wait for a while before checking again
+            # Get connected devices from the database
+            connected_devices = ConnectedDevice.query.filter_by(status='connected').all()
 
-if __name__ == '__main__':
-    # Start the background task handler thread
-    threading.Thread(target=task_handler, daemon=True).start()
+            if len(connected_devices) == 0:
+                print("No connected devices available.")
+                continue
+
+            # Loop through the chunks and send each to a device
+            for i, chunk in enumerate(chunks):
+                # Find the device (loop through devices if there are more chunks than devices)
+                device = connected_devices[i % len(connected_devices)]  # This will cycle through devices if there are more chunks than devices
+                chunk_data = chunk.to_dict(orient='records')  # Convert chunk to a list of dictionaries
+
+                # Send the chunk to the corresponding device
+                emit('task_data', {'data': chunk_data}, to=device.sid)
+
+                print(f"Sent chunk {i + 1} to device {device.uuid} ({device.sid})")
+
+            # After processing the file, move it to an archive or mark it as processed
+            archive_path = os.path.join(UPLOAD_FOLDER, 'processed', TARGET_FILE)
+            os.rename(file_path, archive_path)
+            print(f"File {TARGET_FILE} processed and moved to archive.")
+
+        except Exception as e:
+            print(f"Error processing file {TARGET_FILE}: {e}")
+
+# Create tables
+if __name__ == "__main__":
+    # Create an application context and initialize the database tables
+    with app.app_context():
+        # Add the client column to the database
+        if not hasattr(ConnectedDevice, 'client'):
+            try:
+                db.engine.execute('ALTER TABLE connected_device ADD COLUMN client STRING')
+            except Exception as e:
+                print(f"Error adding client column: {e}")
+
+        # Create tables
+        db.create_all()
+        print("Database tables created successfully.")
+
+        # Start the background task handler thread
+        threading.Thread(target=task_handler, daemon=True).start()
 
     # Run the Flask application with SocketIO
     socketio.run(app, host="0.0.0.0", port=5000, debug=True)

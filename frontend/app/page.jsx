@@ -15,51 +15,79 @@ export default function Home() {
   const [connected, setConnected] = useState(false)
   const [uploadHistory, setUploadHistory] = useState([])
   const [deviceUUID, setDeviceUUID] = useState('')
+  const [uploadStatus, setUploadStatus] = useState(null)
+  const [file, setFile] = useState(null)
+
+  
+
 
   useEffect(() => {
-    const uuid = generateUUID()
-    setDeviceUUID(uuid)
+    const initialize = async () => {
+      const storedUUID = localStorage.getItem('deviceUUID')
+      if (storedUUID) {
+        setDeviceUUID(storedUUID)
+      } else {
+        const storedUUID = generateUUID()
+        localStorage.setItem('deviceUUID', storedUUID)
+        setDeviceUUID(storedUUID)
+      }
+      while (!storedUUID) {
+        await new Promise(resolve => setTimeout(resolve, 100));
+      }
 
-    const socketInstance = io(SOCKET_URL, {
-      query: { uuid: uuid }
-    })
-
-    setSocket(socketInstance)
-
-    socketInstance.on('connect', () => {
-      setConnected(true)
-      const deviceInfo = getDeviceInfo()
-      socketInstance.emit('device_info', {
-        sid: socketInstance.id,
-        uuid: uuid,
-        ...deviceInfo,
+      const socketInstance = io(SOCKET_URL, {
+        query: { uuid: storedUUID }
       })
-    })
 
-    socketInstance.on('disconnect', () => {
-      setConnected(false)
-    })
+      setSocket(socketInstance)
 
-    socketInstance.on('upload_status', (data) => {
-      setUploadHistory(prev => {
-        const index = prev.findIndex(item => item.id === data.id)
-        if (index !== -1) {
-          const newHistory = [...prev]
-          newHistory[index] = data
-          return newHistory
-        }
-        return [...prev, data]
+      socketInstance.on('connect', () => {
+        setConnected(true)
+        const deviceInfo = getDeviceInfo()
+        socketInstance.emit('device_info', {
+          sid: socketInstance.id,
+          client: 'web',
+          uuid: storedUUID,
+          ...deviceInfo,
+        })
       })
-    })
 
-    // Generate initial random data
-    setUploadHistory(generateRandomData())
+      socketInstance.on('disconnect', () => {
+        setConnected(false)
+        const deviceInfo = getDeviceInfo()
+        socketInstance.emit('device_info', {
+          sid: socketInstance.id,
+          client: 'web',
+          uuid: storedUUID,
+          ...deviceInfo,
+        })
+      })
+
+      socketInstance.on('upload_status', (data) => {
+        setUploadHistory(prev => {
+          const index = prev.findIndex(item => item.id === data.id)
+          if (index !== -1) {
+            const newHistory = [...prev]
+            newHistory[index] = data
+            return newHistory
+          }
+          return [...prev, data]
+        })
+      })
+
+      // Generate initial random data
+      setUploadHistory(generateRandomData())
+    }
+
+    initialize()
 
     return () => {
-      socketInstance.disconnect()
+      if (socket) {
+        socket.disconnect()
+      }
     }
   }, [])
-
+  
   const handleConnect = () => {
     if (socket) {
       if (!connected) {
@@ -67,34 +95,6 @@ export default function Home() {
       } else {
         socket.disconnect()
       }
-    }
-  }
-
-  const handleFileUpload = async (e) => {
-    const file = e.target.files?.[0]
-    if (!file || !socket) return
-
-    const formData = new FormData()
-    formData.append('file', file)
-
-    const deviceInfo = getDeviceInfo()
-
-    socket.emit('upload_start', {
-      filename: file.name,
-      size: file.size,
-      uuid: deviceUUID,
-      ...deviceInfo,
-    })
-
-    try {
-      const response = await fetch('/api/upload', {
-        method: 'POST',
-        body: formData,
-      })
-
-      if (!response.ok) throw new Error('Upload failed')
-    } catch (error) {
-      console.error('Upload error:', error)
     }
   }
 
@@ -124,6 +124,49 @@ export default function Home() {
       },
     }
   }
+
+  const handleFileChange = (event) => {
+    setFile(event.target.files[0])
+  }
+
+  const handleUpload = async () => {
+    if (!file) {
+      console.log('Please select a file to upload.');
+      return;
+    }
+  
+    if (!file.name.endsWith('.csv')) {
+      console.log('Only CSV files are allowed.');
+      return;
+    }
+  
+    try {
+      // Prepare FormData to send the file as part of the HTTP request
+      const formData = new FormData();
+      formData.append('file', file);  // Append the file
+      formData.append('sid', socket.id);  // Append the session ID (from Socket.IO or your own logic)
+  
+      // Make the POST request to the server
+      const response = await fetch('http://localhost:5000/upload_file', {
+        method: 'POST',
+        body: formData,
+      });
+  
+      const data = await response.json();
+      if (response.ok) {
+        console.log('File uploaded successfully:', data.message);
+      } else {
+        console.error('Error uploading file:', data.message);
+      }
+  
+    } catch (error) {
+      console.error('Error uploading the file:', error);
+    } finally {
+      console.log('Upload complete.');
+    }
+  }
+  
+
 
   const generateUUID = () => {
     return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
@@ -177,20 +220,26 @@ export default function Home() {
               <Button onClick={handleConnect} variant={connected ? "destructive" : "default"}>
                 {connected ? 'Disconnect' : 'Connect'}
               </Button>
-              <div className="relative">
+              <div className="">
                 <input
                   type="file"
                   accept=".csv"
-                  onChange={handleFileUpload}
-                  className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
+                  onChange={handleFileChange}
+                  className=""
                   disabled={!connected}
                 />
-                <Button disabled={!connected}>
+                <Button onClick={handleUpload} disabled={!connected || !file}>
                   <Upload className="mr-2 h-4 w-4" />
                   Upload CSV
                 </Button>
               </div>
             </div>
+
+            {uploadStatus && (
+              <div className={`mb-4 p-2 rounded ${uploadStatus.status === 'error' ? 'bg-red-100 text-red-700' : 'bg-green-100 text-green-700'}`}>
+                {uploadStatus.message}
+              </div>
+            )}
 
             <Tabs defaultValue="history" className="w-full">
               <TabsList className="w-full justify-start">
