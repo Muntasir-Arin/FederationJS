@@ -1,0 +1,52 @@
+# General ignores
+node_modules/
+.env
+.DS_Store
+Thumbs.db
+
+# Frontend ignores
+/frontend/node_modules/
+/frontend/.next/
+/frontend/out/
+/frontend/.env
+/frontend/.env.local
+/frontend/.env.development
+/frontend/.env.test
+/frontend/.env.production
+/frontend/.turbo/
+frontend/dist/
+frontend/build/
+frontend/.eslintcache
+
+# Backend ignores
+/backend/env/
+/backend/__pycache__/
+/backend/*.pyc
+/backend/*.pyo
+/backend/*.log
+/backend/.env
+/backend/instance/
+/backend/.pytest_cache/
+/backend/htmlcov/
+/backend/.coverage
+/backend/coverage/
+
+# IDE/Editor-specific files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS-specific files
+*.log
+*.bak
+*.tmp
+*.tmp.*
+*.swp
+*.swo
+*.~lock.*
+
+# Coverage reports
+coverage/
+*.lcov
+*.lcov-report
