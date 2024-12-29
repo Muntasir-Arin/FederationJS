@@ -7,6 +7,7 @@ This project explores the implementation of Federated Learning using Transformer
 
 ## Project Idea
 You can find a detailed description of the project idea [here](https://docs.google.com/document/d/1EgUlcfFL9RSYfDEKR-1rMqvcPgLqxgRmVrwU4C35V8M/edit?usp=sharing).
+### Idea Presentation [here](https://docs.google.com/presentation/d/1UzVDS02cYhli7bLyVVJuP2joeKGh1SSunuqT4-eYg68/edit?usp=sharing)
 
 ## Exploratory Data Analysis (EDA)
 The EDA for this project is conducted using a dataset available on Kaggle. The analysis and insights can be found [here](https://www.kaggle.com/code/showrinrahman/notebookb2c6260e09/edit).
