@@ -22,4 +22,4 @@ The code for this project is available in the repository. Please check the respe
 You can view the final presentation summarizing the project objectives, methodologies, and results [here](https://www.canva.com/design/DAGamGazYeg/u1PHAj7dJeMXikAUUhRGYg/edit?utm_content=DAGamGazYeg&utm_campaign=designshare&utm_medium=link2&utm_source=sharebutton).
 
 ## Final Report
-The final report is [here](#)
+The final report is [here](https://drive.google.com/file/d/1XmLSRh_71Vs6ZVaVYydj63Fv0XHAhBlu/view?usp=sharing)
